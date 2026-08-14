@@ -2,9 +2,7 @@
 
 #include <cmath>
 
-std::vector<uint32_t> Generator::generate(
-    const std::vector<uint32_t>& ids, Sampler& sampler, int32_t max_gen_len
-) {
+TokenIds Generator::generate(const TokenIds& ids, Sampler& sampler, int32_t max_gen_len) {
     if (max_gen_len < 0) {
         throw std::runtime_error("Invalid config: max_gen_len must be non-negative.");
     }

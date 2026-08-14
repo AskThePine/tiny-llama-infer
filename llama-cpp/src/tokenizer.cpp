@@ -1,12 +1,11 @@
 #include "tokenizer.h"
 
 #include <stdexcept>
-#include <algorithm>
 
 #include <unicode/utf8.h>
 #include <unicode/uchar.h>
 
-void TokenizerConfig::vaildate() const {
+void TokenizerConfig::validate() const {
     if (vocab_size <= 0) {
         throw std::runtime_error("Invalid tokenizer config: vocab_size must be positive.");
     }
@@ -91,14 +90,14 @@ Symbols pre_tokenizer(const std::string& text) {
     return symbols;
 }
 
-Symbols byte_fallback(
-    const Symbols& symbols, const Vocab& token_to_id, ByteTokens& byte_tokens
+TokenIds byte_fallback(
+    const Symbols& symbols, const Vocab& token_to_id, const ByteTokens& byte_tokens
 ) {
-    Symbols res;
+    TokenIds res;
     for (const auto& symbol : symbols) {
         auto it = token_to_id.find(symbol);
         if (it != token_to_id.end()) {
-            res.push_back(symbol);
+            res.push_back(it->second);
             continue;
         }
         for (uint8_t c : symbol) {
@@ -108,64 +107,48 @@ Symbols byte_fallback(
     return res;
 }
 
-std::vector<Pair> get_pairs(const Symbols& symbols) {
-    const size_t size = symbols.size();
+TokenIds merge_pair(const TokenIds& tokens, const TokenPair& best, const TokenId merged_id) {
+    const size_t size = tokens.size();
     if (size <= 1) {
-        return std::vector<Pair>();
+        return tokens;
     }
 
-    std::vector<Pair> pairs;
-    for (size_t i = 1;i < size;i++) {
-        pairs.push_back({ symbols[i - 1], symbols[i] });
-    }
-    return pairs;
-}
-
-Symbols merge_pair(const Symbols& symbols, const Pair& top) {
-    const size_t size = symbols.size();
-    if (size <= 1) {
-        return symbols;
-    }
-
-    Symbols res;
+    TokenIds res;
     for (size_t i = 0;i < size;) {
         if (i < size - 1) {
-            const Pair pair = { symbols[i], symbols[i + 1] };
-            if (pair == top) {
-                res.push_back(symbols[i] + symbols[i + 1]);
+            const TokenPair pair = { tokens[i], tokens[i + 1] };
+            if (pair == best) {
+                res.push_back(merged_id);
                 i += 2;
                 continue;
             }
         }
-        res.push_back(symbols[i]);
+        res.push_back(tokens[i]);
         i++;
     }
     return res;
 }
 
-Symbols apply_bpe(const Symbols& symbols, const Rank& pair_rank) {
-    Symbols cur = symbols;
+TokenIds apply_bpe(const TokenIds& tokens, const MergeTable& merges) {
+    TokenIds cur = tokens;
     while (true) {
-        auto pairs = get_pairs(cur);
-        if (pairs.empty()) {
-            break;
-        }
-
-        Pair top{};
+        TokenPair best{};
         uint32_t min_rank = UINT32_MAX;
-        for (const auto& pair : pairs) {
-            auto it = pair_rank.find(pair);
-            const uint32_t rank = (it != pair_rank.end()) ? it->second : UINT32_MAX;
-            if (rank < min_rank) {
-                top = pair;
-                min_rank = rank;
+        TokenId merged_id = 0;
+        for (size_t i = 1;i < cur.size();i++) {
+            const TokenPair pair{ cur[i - 1], cur[i] };
+            auto it = merges.find(pair);
+            if (it != merges.end() && it->second.rank < min_rank) {
+                best = pair;
+                min_rank = it->second.rank;
+                merged_id = it->second.merged_id;
             }
         }
         if (min_rank == UINT32_MAX) {
             break;
         }
 
-        cur = merge_pair(cur, top);
+        cur = merge_pair(cur, best, merged_id);
         if (cur.size() <= 1) {
             break;
         }
@@ -185,28 +168,25 @@ void Tokenizer::init_byte_fallback() {
             if (it == token_to_id.end()) {
                 throw std::runtime_error("Missing byte fallback token: " + s + ".");
             }
-            byte_tokens[i * 16 + j] = s;
+            byte_tokens[i * 16 + j] = it->second;
         }
     }
 }
 
-bool Tokenizer::is_special_token(const uint32_t id) const {
+bool Tokenizer::is_special_token(const TokenId id) const {
     return id == config.bos_id || id == config.eos_id || id == config.pad_id;
 }
 
-std::vector<uint32_t> Tokenizer::encode(const std::string& text, bool add_bos, bool add_eos) {
+TokenIds Tokenizer::encode(const std::string& text, bool add_bos, bool add_eos) const {
     std::vector<uint32_t> ids;
     if (add_bos) {
         ids.push_back(config.bos_id);
     }
 
     auto symbols = pre_tokenizer(text);
-    symbols = byte_fallback(symbols, token_to_id, byte_tokens);
-    symbols = apply_bpe(symbols, pair_rank);
-
-    for (const auto& symbol : symbols) {
-        auto it = token_to_id.find(symbol);
-        const uint32_t id = (it != token_to_id.end()) ? it->second : config.unk_id;
+    auto initial_ids = byte_fallback(symbols, token_to_id, byte_tokens);
+    auto merged_ids = apply_bpe(initial_ids, merge_rules);
+    for (const auto& id : merged_ids) {
         ids.push_back(id);
     }
 
@@ -268,7 +248,7 @@ void flush_byte_buffer(std::string& res, std::vector<uint8_t>& buffer) {
     buffer.clear();
 }
 
-std::string Tokenizer::decode(const std::vector<uint32_t>& ids, bool skip_special_tokens) const {
+std::string Tokenizer::decode(const TokenIds& ids, bool skip_special_tokens) const {
     std::string res;
     std::vector<uint8_t> buffer;
     uint8_t byte = 0;

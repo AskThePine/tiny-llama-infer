@@ -2,43 +2,63 @@
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
-#include <map>
 #include <array>
 #include <string>
+
+using TokenId = uint32_t;
 
 struct TokenizerConfig {
     int32_t vocab_size = 32000;
     int32_t merge_count = 61249;
     int32_t model_max_length = 2048;
     // special token ids
-    uint32_t bos_id = 1;
-    uint32_t eos_id = 2;
-    uint32_t pad_id = 2;
-    uint32_t unk_id = 0;
+    TokenId bos_id = 1;
+    TokenId eos_id = 2;
+    TokenId pad_id = 2;
+    TokenId unk_id = 0;
 
-    void vaildate() const;
+    void validate() const;
 };
 
-using Vocab = std::unordered_map<std::string, uint32_t>;
-using Pair = std::array<std::string, 2UL>;
-using Rank = std::map<Pair, uint32_t>;
-using ByteTokens = std::array<std::string, 256>;
+struct TokenPair {
+    TokenId left;
+    TokenId right;
+    bool operator==(const TokenPair& other) const {
+        return left == other.left && right == other.right;
+    }
+};
+
+struct TokenPairHash {
+    std::size_t operator()(const TokenPair& pair) const noexcept {
+        std::size_t h1 = std::hash<TokenId>{}(pair.left);
+        std::size_t h2 = std::hash<TokenId>{}(pair.right);
+        return h1 ^ (h2 << 1);
+    }
+};
+
+struct MergeRule {
+    TokenId merged_id;
+    uint32_t rank;
+};
+
+using Vocab = std::unordered_map<std::string, TokenId>;
+using MergeTable = std::unordered_map<TokenPair, MergeRule, TokenPairHash>;
+using ByteTokens = std::array<TokenId, 256>;
+using TokenIds = std::vector<TokenId>;
 
 struct Tokenizer {
     TokenizerConfig config;
 
     Vocab token_to_id;
     std::vector<std::string> id_to_token;
-    Rank pair_rank;
+    MergeTable merge_rules;
 
     ByteTokens byte_tokens;
 
     void init_byte_fallback();
 
-    bool is_special_token(const uint32_t id) const;
+    bool is_special_token(const TokenId id) const;
 
-    std::vector<uint32_t> encode(
-        const std::string& text, bool add_bos = true, bool add_eos = false
-    );
-    std::string decode(const std::vector<uint32_t>& ids, bool skip_special_tokens = true) const;
+    TokenIds encode(const std::string& text, bool add_bos = true, bool add_eos = false) const;
+    std::string decode(const TokenIds& ids, bool skip_special_tokens = true) const;
 };

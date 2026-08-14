@@ -274,6 +274,7 @@ void load_vocab(Cursor& cursor, Tokenizer& tokenizer) {
     Vocab& token_to_id = tokenizer.token_to_id;
     std::vector<std::string>& id_to_token = tokenizer.id_to_token;
     token_to_id.clear();
+    token_to_id.reserve(size);
     id_to_token.assign(size, {});
 
     for (int32_t i = 0;i < size;i++) {
@@ -303,8 +304,9 @@ void load_vocab(Cursor& cursor, Tokenizer& tokenizer) {
 
 void load_pair_rank(Cursor& cursor, Tokenizer& tokenizer) {
     const int32_t count = tokenizer.config.merge_count;
-    Rank& pair_rank = tokenizer.pair_rank;
-    pair_rank.clear();
+    MergeTable& merge_rules = tokenizer.merge_rules;
+    merge_rules.clear();
+    merge_rules.reserve(count);
 
     for (int32_t i = 0;i < count;i++) {
         const uint32_t rank = cursor.read<uint32_t>();
@@ -319,19 +321,26 @@ void load_pair_rank(Cursor& cursor, Tokenizer& tokenizer) {
         std::string left = cursor.read_string((size_t)left_size);
         std::string right = cursor.read_string((size_t)right_size);
 
-        if (tokenizer.token_to_id.count(left) == 0) {
+        auto left_it = tokenizer.token_to_id.find(left);
+        if (left_it == tokenizer.token_to_id.end()) {
             throw std::runtime_error("Left token: " + left + " is not in tokenzier voacb.");
         }
-        if (tokenizer.token_to_id.count(right) == 0) {
+        auto right_it = tokenizer.token_to_id.find(right);
+        if (right_it == tokenizer.token_to_id.end()) {
             throw std::runtime_error("Right token: " + right + " is not in tokenzier voacb.");
         }
-        const Pair pair = { left, right };
-        if (pair_rank.count(pair) != 0) {
+        auto merge_it = tokenizer.token_to_id.find(left + right);
+        if (merge_it == tokenizer.token_to_id.end()) {
+            throw std::runtime_error("Merged token: " + left + right + " is not in tokenzier voacb.");
+        }
+
+        const TokenPair pair = { left_it->second, right_it->second };
+        if (merge_rules.count(pair) != 0) {
             throw std::runtime_error(
-                "Tokenizer pair_rank has the same pair: (" + left + ", " + right + ")."
+                "Tokenizer merges has the same pair: (" + left + ", " + right + ")."
             );
         }
-        pair_rank[pair] = rank;
+        merge_rules[pair] = { merge_it->second,rank };
     }
 }
 
@@ -339,7 +348,7 @@ void load_tokenizer(const std::string& file_path, Tokenizer& tokenizer) {
     MappedFile file(file_path);
     Cursor cursor(file.data(), file.size());
     load_tokenizer_config(cursor, tokenizer.config);
-    tokenizer.config.vaildate();
+    tokenizer.config.validate();
     load_vocab(cursor, tokenizer);
     tokenizer.init_byte_fallback();
     load_pair_rank(cursor, tokenizer);
