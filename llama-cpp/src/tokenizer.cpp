@@ -42,6 +42,7 @@ bool is_unicode_whitespace(const uint32_t cp) {
     return u_isUWhiteSpace(static_cast<UChar32>(cp));
 }
 
+// 将 UTF-8 字节串拆成 Unicode code point
 std::vector<uint32_t> decode_utf8(const std::string& text) {
     std::vector<uint32_t> res;
     const int32_t length = text.size();
@@ -60,6 +61,7 @@ std::vector<uint32_t> decode_utf8(const std::string& text) {
     return res;
 }
 
+// 将单个 code point 重新编码为 UTF-8 字符串，作为预分词阶段的一个 symbol
 std::string encode_utf8(const uint32_t cp) {
     std::string res;
     char buf[4];
@@ -72,17 +74,22 @@ std::string encode_utf8(const uint32_t cp) {
 
 using Symbols = std::vector<std::string>;
 
+// 执行与 TinyLlama 词表约定相符的预分词
+// e.g. "hello world" -> [" ", "h", ..., "o", " ", "w", ...]
 Symbols pre_tokenizer(const std::string& text) {
     const auto codepoints = decode_utf8(text);
 
     Symbols symbols;
+    // 非空且不以空格开头的输入补一个前导空格
     if (!codepoints.empty() && !is_whitespace(codepoints.front())) {
         symbols.emplace_back(1, kSpaceChar);
     }
     for (const auto cp : codepoints) {
         if (is_whitespace(cp)) {
+            // 保留每个 ASCII 空格
             symbols.emplace_back(1, kSpaceChar);
         } else {
+            // 其余 Unicode 字符各自成为一个 UTF-8 symbol
             symbols.push_back(encode_utf8(cp));
         }
     }
@@ -90,6 +97,7 @@ Symbols pre_tokenizer(const std::string& text) {
     return symbols;
 }
 
+// 将预分词 symbol 转成初始 token 序列
 TokenIds byte_fallback(
     const Symbols& symbols, const Vocab& token_to_id, const ByteTokens& byte_tokens
 ) {
@@ -97,9 +105,11 @@ TokenIds byte_fallback(
     for (const auto& symbol : symbols) {
         auto it = token_to_id.find(symbol);
         if (it != token_to_id.end()) {
+            // 若完整 symbol 已在词表中，使用它的 token id
             res.push_back(it->second);
             continue;
         }
+        // 否则逐个取其 UTF-8 字节，映射为 <0x00> 到 <0xFF> 的 byte fallback token
         for (uint8_t c : symbol) {
             res.push_back(byte_tokens[c]);
         }
@@ -158,6 +168,7 @@ TokenIds apply_bpe(const TokenIds& tokens, const MergeTable& merges) {
 
 constexpr char hex[] = "0123456789ABCDEF";
 
+// 在加载词表后建立 byte 值到 token id 的固定查找表
 void Tokenizer::init_byte_fallback() {
     std::string s = "<0x00>";
     for (size_t i = 0;i < 16;i++) {
@@ -196,6 +207,9 @@ TokenIds Tokenizer::encode(const std::string& text, bool add_bos, bool add_eos) 
     return ids;
 }
 
+// 判断词表字符串是否为 <0xAB> 格式的 byte fallback token
+// 若是则解析其十六进制内容写入 byte
+// decode 会先累积这些字节，以便还原被 byte fallback 编码的 UTF-8
 bool parse_byte_token(const std::string& s, uint8_t& byte) {
     if (s.size() != 6) {
         return false;
@@ -221,6 +235,7 @@ bool parse_byte_token(const std::string& s, uint8_t& byte) {
     return true;
 }
 
+// 将连续的 byte fallback token 还原为文本并追加到 res
 void flush_byte_buffer(std::string& res, std::vector<uint8_t>& buffer) {
     if (buffer.empty()) {
         return;
@@ -241,6 +256,7 @@ void flush_byte_buffer(std::string& res, std::vector<uint8_t>& buffer) {
     if (valid_utf8) {
         res.append(reinterpret_cast<const char*>(buffer.data()), buffer.size());
     } else {
+        // 若整段字节不是合法 UTF-8，则每个原始字节输出一个替换字符
         for (size_t i = 0;i < buffer.size();i++) {
             res.append(kReplacementStr);
         }
@@ -261,6 +277,7 @@ std::string Tokenizer::decode(const TokenIds& ids, bool skip_special_tokens) con
             continue;
         }
         const std::string& token = id_to_token[id];
+        // 普通词表 token 可直接拼接；byte fallback token 先放入 buffer，直到遇到普通 token 或序列结束时再统一还原
         if (parse_byte_token(token, byte)) {
             buffer.push_back(byte);
         } else {
@@ -270,6 +287,7 @@ std::string Tokenizer::decode(const TokenIds& ids, bool skip_special_tokens) con
     }
     flush_byte_buffer(res, buffer);
 
+    // 移除预分词约定产生的一个前导空格
     if (res.size() > 0 && res.front() == kSpaceChar) {
         res.erase(0, 1);
     }
